@@ -1,0 +1,196 @@
+name: Client Growth Mobility Weekly Watch
+
+on:
+  schedule:
+    # Every Wednesday at 06:00 UTC = 08:00 CEST (Paris)
+    - cron: '0 6 * * 3'
+  workflow_dispatch: # Allow manual trigger from GitHub UI
+
+jobs:
+  generate-and-post:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Generate newsletter and post to Slack
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+        run: |
+          python3 << 'PYEOF'
+          import urllib.request
+          import urllib.parse
+          import json
+          import datetime
+          import sys
+
+          ANTHROPIC_API_KEY = "${{ secrets.ANTHROPIC_API_KEY }}"
+          SLACK_BOT_TOKEN = "${{ secrets.SLACK_BOT_TOKEN }}"
+
+          # Channel IDs to monitor
+          SOURCE_CHANNELS = [
+              "C036XMK8QUT",  # competitive-intelligence
+              "C0253FT85R9",  # competitive-intelligence-territories
+              "C01U99UDTK4",  # competitive-intellligence-mobility
+              "C0ABCJSFUSJ",  # crossteam-ke-marketing
+              "C06CGR2QLEM",  # marketing-territoires
+              "C02HBAGEM18",  # useful-media-impact-karos
+              "C062JEMQWJF",  # useful-product-inspiration
+          ]
+
+          # Destinations
+          TARGET_CHANNEL = "C0A4H3JQMQR"   # team-feature-client-growth-internal
+          VICTOR_DM = "D085BA2E57W"        # Victor Andraud DM
+
+          # Date range: last 7 days
+          today = datetime.date.today()
+          week_ago = today - datetime.timedelta(days=7)
+          oldest_ts = str(int(datetime.datetime.combine(week_ago, datetime.time.min).timestamp()))
+
+          def slack_request(endpoint, payload):
+              url = f"https://slack.com/api/{endpoint}"
+              data = json.dumps(payload).encode("utf-8")
+              req = urllib.request.Request(
+                  url,
+                  data=data,
+                  headers={
+                      "Authorization": f"Bearer {SLACK_BOT_TOKEN}",
+                      "Content-Type": "application/json",
+                  },
+              )
+              with urllib.request.urlopen(req) as resp:
+                  return json.loads(resp.read())
+
+          def get_channel_messages(channel_id):
+              payload = {
+                  "channel": channel_id,
+                  "oldest": oldest_ts,
+                  "limit": 50,
+              }
+              result = slack_request("conversations.history", payload)
+              if not result.get("ok"):
+                  return []
+              messages = result.get("messages", [])
+              # Filter out join/leave system messages
+              return [m for m in messages if m.get("subtype") is None and m.get("text", "").strip()]
+
+          # Collect all messages from all source channels
+          print("Fetching Slack messages from the past 7 days...")
+          all_messages = []
+          for channel_id in SOURCE_CHANNELS:
+              msgs = get_channel_messages(channel_id)
+              for m in msgs:
+                  ts = datetime.datetime.fromtimestamp(float(m["ts"])).strftime("%Y-%m-%d")
+                  all_messages.append({
+                      "channel": channel_id,
+                      "date": ts,
+                      "text": m.get("text", ""),
+                      "ts": m["ts"],
+                  })
+
+          if not all_messages:
+              print("No messages found this week — skipping post.")
+              sys.exit(0)
+
+          # Format messages for the prompt
+          messages_text = "\n\n".join([
+              f"[{m['date']} | channel:{m['channel']} | ts:{m['ts']}]\n{m['text']}"
+              for m in all_messages
+          ])
+
+          # Date range label
+          start_str = week_ago.strftime("%B %d")
+          end_str = today.strftime("%B %d")
+          date_label = f"{start_str}–{end_str}"
+
+          SYSTEM_PROMPT = """You are a strategic B2B mobility watch agent for the "Client Growth" feature team at Karos, a daily carpooling app.
+
+          Client Growth scope:
+          - App & SaaS personalisation for KT/KE clients (SSO, custom branding, return insurance)
+          - Territory mobility network integrations (MaaS, Carpool Areas & Stops, intermodality, transit pass)
+          - Employer integrations & benefits (company affiliation, parking, FMD/Mobility Package)
+          - Strategic priority this cycle: evaluating a B2B2C model shift
+
+          Current strategic priorities (without naming internal OKR codes):
+          - Making Karos a must-have platform for territory (KT) and employer (KE) clients
+          - Deeper integration into client mobility networks and ecosystems
+          - Evaluating a B2B2C app model (white-label / full integration)
+          - Scaling the Service Package commercial model
+
+          Your 3 editorial missions:
+          1. Signals relevant to current strategic decisions (B2B2C, KT/KE stickiness, network integration)
+          2. B2B client insights: what the field is telling us about KT and KE client needs
+          3. Competitive & market watch: players, tools, trends in mobility
+
+          Output format — strict Slack markdown:
+          - Beta callout header (italic)
+          - Bold title: *📡 Client Growth Mobility Weekly Watch — [DATES]*
+          - Horizontal rule ---
+          - 3 to 8 bullet points, prioritised by relevance to current strategic priorities
+          - Each point: emoji + bold title + 2-3 lines of analysis with "so what for Client Growth"
+          - Each point must include source links in format: → <SLACK_ARCHIVE_URL|Slack> · <WEB_URL|Source name>
+          - Short footer (one line, italic)
+
+          Rules:
+          - English only
+          - Only use signals from THIS WEEK — if nothing relevant, say so honestly with fewer bullets
+          - Never mention internal OKR/KR codes or cycle names
+          - No thread — everything in the main post
+          - Be concise: readable in under 1 minute
+          - For Slack archive links, use format: https://karoscrew.slack.com/archives/CHANNEL_ID/pTIMESTAMP (remove the dot from the ts, e.g. 1781004680.718719 becomes p1781004680718719)"""
+
+          USER_PROMPT = f"""Here are all messages posted this week (Monday to Sunday) across our monitored Slack channels:
+
+          ---
+          {messages_text}
+          ---
+
+          Generate the weekly newsletter for the Client Growth team.
+          Date range to display: {date_label}
+          Today's date: {today.strftime("%B %d, %Y")}
+
+          Select only the most relevant signals for our B2B mobility scope. If very few signals are relevant, produce fewer bullet points. If nothing is relevant, write a short honest note saying there's nothing to report this week."""
+
+          # Call Anthropic API
+          print("Calling Claude to generate newsletter...")
+          anthropic_payload = {
+              "model": "claude-sonnet-4-6",
+              "max_tokens": 1500,
+              "system": SYSTEM_PROMPT,
+              "messages": [{"role": "user", "content": USER_PROMPT}],
+          }
+          req = urllib.request.Request(
+              "https://api.anthropic.com/v1/messages",
+              data=json.dumps(anthropic_payload).encode("utf-8"),
+              headers={
+                  "x-api-key": ANTHROPIC_API_KEY,
+                  "anthropic-version": "2023-06-01",
+                  "content-type": "application/json",
+              },
+          )
+          with urllib.request.urlopen(req) as resp:
+              result = json.loads(resp.read())
+
+          newsletter = result["content"][0]["text"].strip()
+          print("Newsletter generated.")
+          print("---")
+          print(newsletter)
+          print("---")
+
+          # Post to team channel
+          print(f"Posting to {TARGET_CHANNEL}...")
+          slack_request("chat.postMessage", {
+              "channel": TARGET_CHANNEL,
+              "text": newsletter,
+              "mrkdwn": True,
+          })
+
+          # Post to Victor's DM
+          print(f"Posting to Victor DM {VICTOR_DM}...")
+          slack_request("chat.postMessage", {
+              "channel": VICTOR_DM,
+              "text": newsletter,
+              "mrkdwn": True,
+          })
+
+          print("Done!")
+          PYEOF
