@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: 'Dry run? (true = DM to Laetitia only for testing, false = post to channel + Victor)'
+        description: 'Dry run? (true = DM to Laetitia only, false = post to channel + Victor)'
         required: true
         default: 'true'
         type: choice
@@ -37,7 +37,6 @@ jobs:
           SLACK_BOT_TOKEN = os.environ["SLACK_BOT_TOKEN"]
           DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"
 
-          # Channel IDs to monitor
           SOURCE_CHANNELS = [
               "C036XMK8QUT",  # competitive-intelligence
               "C0253FT85R9",  # competitive-intelligence-territories
@@ -48,12 +47,10 @@ jobs:
               "C062JEMQWJF",  # useful-product-inspiration
           ]
 
-          # Destinations
           TARGET_CHANNEL = "C0A4H3JQMQR"   # team-feature-client-growth-internal
-          VICTOR_USER_ID = "U074KSU1K5H"   # Victor Andraud user ID
-          LAETITIA_USER_ID = "U07Q8JGCQH4" # Laetitia user ID (dry run destination)
+          VICTOR_USER_ID = "U074KSU1K5H"   # Victor Andraud
+          LAETITIA_USER_ID = "U07Q8JGCQH4" # Laetitia (dry run)
 
-          # Date range: last 7 days
           today = datetime.date.today()
           week_ago = today - datetime.timedelta(days=7)
           oldest_ts = str(int(datetime.datetime.combine(week_ago, datetime.time.min).timestamp()))
@@ -75,7 +72,6 @@ jobs:
                   return result
 
           def open_dm_and_post(user_id, text):
-              """Open a DM channel with a user and post a message."""
               result = slack_api("conversations.open", {"users": user_id})
               if result.get("ok"):
                   channel_id = result["channel"]["id"]
@@ -85,7 +81,7 @@ jobs:
                       "unfurl_links": False,
                       "unfurl_media": False,
                   })
-                  print(f"  DM sent to user {user_id} via channel {channel_id}")
+                  print(f"  DM sent to {user_id}")
               else:
                   print(f"  Could not open DM with {user_id}: {result.get('error')}")
 
@@ -93,22 +89,21 @@ jobs:
               payload = {"channel": channel_id, "oldest": oldest_ts, "limit": 50}
               result = slack_api("conversations.history", payload)
               if not result.get("ok"):
-                  print(f"  Could not read channel {channel_id}: {result.get('error')}")
+                  print(f"  Could not read {channel_id}: {result.get('error')}")
                   return []
               messages = result.get("messages", [])
               return [m for m in messages if m.get("subtype") is None and m.get("text", "").strip()]
 
-          # Collect all messages from all source channels
           print("Fetching Slack messages from the past 7 days...")
           all_messages = []
           for channel_id in SOURCE_CHANNELS:
               msgs = get_channel_messages(channel_id)
               print(f"  {channel_id}: {len(msgs)} messages")
               for m in msgs:
-                  ts = datetime.datetime.fromtimestamp(float(m["ts"])).strftime("%Y-%m-%d")
+                  ts_fmt = datetime.datetime.fromtimestamp(float(m["ts"])).strftime("%Y-%m-%d")
                   all_messages.append({
                       "channel": channel_id,
-                      "date": ts,
+                      "date": ts_fmt,
                       "text": m.get("text", ""),
                       "ts": m["ts"],
                   })
@@ -119,85 +114,80 @@ jobs:
 
           print(f"Total: {len(all_messages)} messages collected.")
 
-          # Format messages for the prompt
           messages_text = "\n\n".join([
               f"[{m['date']} | channel:{m['channel']} | slack_ts:{m['ts']}]\n{m['text']}"
               for m in all_messages
           ])
 
-          # Date range label
           start_str = week_ago.strftime("%B %d")
           end_str = today.strftime("%B %d")
           date_label = f"{start_str}–{end_str}"
 
-          SYSTEM_PROMPT = """You are a strategic B2B mobility watch agent for the "Client Growth" feature team at Karos, a daily carpooling app.
+          SYSTEM_PROMPT = """You are a strategic intelligence agent for the Client Growth product feature team at Karos, a B2B daily carpooling platform.
 
-          == CLIENT GROWTH SCOPE (only cover signals relevant to these) ==
-          Client Growth owns:
-          - KT/KE app & SaaS personalisation: Custom Start Screen, visual identity, Territory Showcase Website, SaaS SSO, Mobile app SSO, pricing rules, Return insurance
-          - KT network integration: MaaS, Carpool Areas & Stops, Anti-competition rules (incl. Ecov integration), Carpool lanes, Intermodality, Transit Pass integration
-          - KE integration & employer benefits: Company affiliation user flow, Company Parking, Mobility Package / FMD (Forfait Mobilité Durable), Cost-sharing
+== YOUR AUDIENCE ==
+Product Managers, Designers, and Engineers in the Client Growth team. They work across the full product development cycle: Discover → Scope → Frame → Make → Go to Market → Assess Impact.
 
-          Client Growth does NOT own (ignore these topics):
-          - Challenges, Comm kits, Gift Machine, Promocodes, Karos events (→ Client Servicing)
-          - Admin tools, invoicing, fraud, compliance (→ Client Servicing)
-          - User onboarding, matching, booking, payment (→ Carpooling Experience)
-          - Referral program, lifecycle messaging (→ Carpooling Experience)
+Your newsletter must serve them specifically in the early phases: Discovery (understanding problems in their entirety), Scoping (narrowing to key issues, understanding reach/impact), and Framing (identifying solutions, competitive benchmarks, market context).
 
-          == CURRENT STRATEGIC PRIORITIES ==
-          - Making Karos a must-have platform for KT and KE clients (stickiness)
-          - Deeper integration into client mobility ecosystems (MaaS, intermodality, stops)
-          - Evaluating a B2B2C model (white-label app per territory/employer)
-          - Scaling the Service Package commercial model
+Every signal you surface should help them answer one or more of these questions:
+- What problems are our KT/KE clients facing that we haven't solved yet?
+- What are competitors doing that could inform our solution space?
+- What market trends or regulations could affect our product decisions?
+- What analogous solutions in adjacent markets could inspire our approach?
+- What new client needs are emerging that could reshape our roadmap?
 
-          == EDITORIAL RULES ==
-          1. RELEVANCE FILTER: Only include signals that directly inform Client Growth's scope. If a signal is about user engagement, fraud, or support tools — skip it. When in doubt, skip it.
-          2. INSTRUCTIVE: Every bullet point must teach the team something actionable or help frame a decision. If a bullet only says "X happened" without any "so what for Client Growth" — cut it.
-          3. PRIORITISATION: Lead with signals that are most critical for current strategic decisions. Signals about client demand (KT/KE needs), competitive moves (Ecov, BBCD), and market trends (regulation, funding, new players) should rank highest.
-          4. HONESTY: If there are fewer than 3 relevant signals this week, say so and publish fewer bullets. Never pad with low-value content.
-          5. LINKS: 
-             - For each bullet, include a Slack source link using format: https://karoscrew.slack.com/archives/CHANNEL_ID/pTIMESTAMP (replace the dot in ts: 1781004680.718719 → p1781004680718719)
-             - For external web links: only include them if you are 100% certain the URL is correct and leads to the exact source. If uncertain, use only the Slack link.
-             - Never invent or guess URLs.
-          6. NO LINK PREVIEWS: All links must be wrapped in angle brackets with a label to suppress previews: <URL|Label>
-          7. FORMAT: One single bold title. No double title. No thread.
+== CLIENT GROWTH SCOPE (strict filter) ==
+Only include signals relevant to these areas:
+- KT/KE app & SaaS personalisation: Custom branding, SSO, Territory Showcase, pricing rules, Return insurance
+- KT network integration: MaaS, Carpool Areas & Stops, Anti-competition rules, Carpool lanes, Intermodality, Transit Pass integration
+- KE employer benefits: Company affiliation, Company Parking, Mobility Package / FMD, Cost-sharing
+- B2B2C model evaluation: white-label carpooling, deeper territory/employer integration
 
-          == OUTPUT FORMAT (strict Slack markdown) ==
-          _🧪 Beta — AI-generated digest from Slack · Feedback welcome_
+Do NOT include signals about (these belong to other teams):
+- Gift Machine, Challenges, Comm kits, Promocodes, Karos events → Client Servicing
+- Fraud, compliance, invoicing, Admin tools → Client Servicing
+- User onboarding, matching, booking, ride experience → Carpooling Experience
+- Referral program, user lifecycle, retention campaigns → Carpooling Experience
 
-          *📡 Client Growth Mobility Weekly Watch — [DATES]*
+== EDITORIAL STANDARDS ==
+1. PRODUCT UTILITY: Every bullet must serve discovery, scoping, or framing work. Ask: "Would a PM use this to better understand a problem, scope a solution, or benchmark against competitors?" If no → cut it.
+2. INSTRUCTIVE, NOT DESCRIPTIVE: Don't just report that something happened. Explain what it means for Client Growth's product decisions. "X happened" is not enough — "X happened, which means we should consider Y when scoping Z" is the bar.
+3. PRIORITISE BY PRODUCT IMPACT: Lead with signals about unmet client needs (KT/KE demands), competitive product moves, and market trends that could directly influence the roadmap.
+4. HONESTY OVER PADDING: 3 to 7 bullets max. If fewer than 3 relevant signals exist this week, publish fewer. Never pad with low-value content.
+5. EXTERNAL LINKS: Include web source links only when you are certain the URL is exact and functional. Never guess or construct URLs. If uncertain, use only the Slack link.
+6. NO LINK PREVIEWS: Always use format <URL|Label> to suppress Slack previews.
+7. LANGUAGE: English only.
 
-          ---
+== OUTPUT FORMAT ==
+*📡 Client Growth Mobility Weekly Watch — [DATES]*
 
-          [bullet points]
+---
 
-          ---
-          _✨ Generated by Claude from Slack_
+[3–7 bullet points, each on its own block]
+EMOJI *Bold signal title* — 2–3 lines explaining the signal AND its implication for Client Growth product work (discovery/scoping/framing).
+→ <https://karoscrew.slack.com/archives/CHANNEL_ID/pTIMESTAMP|Slack>[optionally · <VERIFIED_URL|Source name>]
 
-          Each bullet: EMOJI *Bold title* — 2-3 lines of analysis with clear "so what for Client Growth" implication.
-          Then on a new line: → <SLACK_URL|Slack>[optionally · <WEB_URL|Source name> only if URL is certain]"""
+---
+_🧪 Beta · AI-generated from Slack signals · Feedback welcome_"""
 
           USER_PROMPT = f"""Here are all messages posted this week across our monitored Slack channels:
 
-          ---
-          {messages_text}
-          ---
+---
+{messages_text}
+---
 
-          Generate the weekly newsletter for the Client Growth team.
-          Date range: {date_label}
-          Today: {today.strftime("%B %d, %Y")}
-          Mode: {"DRY RUN (testing)" if DRY_RUN else "PRODUCTION"}
+Generate the weekly newsletter for the Client Growth product team.
+Date range: {date_label}
+Today: {today.strftime("%B %d, %Y")}
+Mode: {"DRY RUN (testing)" if DRY_RUN else "PRODUCTION"}
 
-          Instructions:
-          - Filter ruthlessly: only keep signals relevant to Client Growth scope
-          - Every bullet must be instructive — cut anything that doesn't help the team learn or decide
-          - 3 to 7 bullets max, ordered by priority
-          - If fewer than 3 relevant signals exist, publish fewer — do not pad
-          - Suppress all link previews using <URL|Label> format
-          - Only include external web URLs you are certain about; otherwise Slack link only"""
+For Slack archive links: convert ts by removing the dot, e.g. 1781004680.718719 → p1781004680718719
+URL format: https://karoscrew.slack.com/archives/CHANNEL_ID/pTIMESTAMP
 
-          # Call Anthropic API
-          print("Calling Claude to generate newsletter...")
+Filter strictly: only keep signals that a Product Manager would use during discovery, scoping, or framing of Client Growth features. Cut anything descriptive without product implications. Cut anything outside Client Growth scope."""
+
+          print("Calling Claude...")
           anthropic_payload = {
               "model": "claude-sonnet-4-6",
               "max_tokens": 1500,
@@ -223,11 +213,11 @@ jobs:
           print("---")
 
           if DRY_RUN:
-              print("DRY RUN — posting only to Laetitia's DM...")
+              print("DRY RUN — sending only to Laetitia...")
               open_dm_and_post(LAETITIA_USER_ID, f"🧪 *[DRY RUN — not sent to channel]*\n\n{newsletter}")
-              print("Dry run complete. No messages sent to channel or Victor.")
+              print("Dry run complete.")
           else:
-              print(f"PRODUCTION — posting to channel {TARGET_CHANNEL}...")
+              print(f"Posting to channel {TARGET_CHANNEL}...")
               slack_api("chat.postMessage", {
                   "channel": TARGET_CHANNEL,
                   "text": newsletter,
